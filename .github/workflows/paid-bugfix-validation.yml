@@ -19,16 +19,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - pr: 304
-            head: 4b725e78c93c474b1b78cd344f69da5453b33622
-            tree: c2aa83002af714bfc6f5378e94f7859cd1f74bb1
-            regression: test/mcp-notification-response.test.ts
-            marker: known methods do not reply to messages without an id
-          - pr: 305
-            head: 43bd59034876359f8621d085d40a14eda9069871
-            tree: 9bbdfafa38af76a4c2b45b7d49e8d0566f46b1ee
-            regression: test/markdown-link-literals.test.ts
-            marker: an explicit module link retains its __init__.py destination
+          - pr: 306
+            head: 2fb5f1679bd43a5bf56c86e72635ff9e0d53216c
+            tree: d8dc36bd36e65db4f1e8cb6592a0ea9bf55b9ff1
+            regression: test/resume-indented-heading.test.ts
+            marker: resume headings with 2 leading spaces retain candidate skills
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -162,14 +157,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - pr: 304
-            head: 4b725e78c93c474b1b78cd344f69da5453b33622
-            tree: c2aa83002af714bfc6f5378e94f7859cd1f74bb1
-            regression: test/mcp-notification-response.test.ts
-          - pr: 305
-            head: 43bd59034876359f8621d085d40a14eda9069871
-            tree: 9bbdfafa38af76a4c2b45b7d49e8d0566f46b1ee
-            regression: test/markdown-link-literals.test.ts
+          - pr: 306
+            head: 2fb5f1679bd43a5bf56c86e72635ff9e0d53216c
+            tree: d8dc36bd36e65db4f1e8cb6592a0ea9bf55b9ff1
+            regression: test/resume-indented-heading.test.ts
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
