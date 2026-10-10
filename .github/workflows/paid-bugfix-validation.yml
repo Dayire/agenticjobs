@@ -1,0 +1,227 @@
+name: Paid bugfix verification
+
+on:
+  push:
+    branches: [codex/paid-bugfix-ci]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paid-bugfix-verification
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Node, Bun and PostgreSQL / PR ${{ matrix.pr }}
+    if: github.repository == 'Dayire/agenticjobs'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 304
+            head: 4b725e78c93c474b1b78cd344f69da5453b33622
+            tree: c2aa83002af714bfc6f5378e94f7859cd1f74bb1
+            regression: test/mcp-notification-response.test.ts
+            marker: known methods do not reply to messages without an id
+          - pr: 305
+            head: 43bd59034876359f8621d085d40a14eda9069871
+            tree: 9bbdfafa38af76a4c2b45b7d49e8d0566f46b1ee
+            regression: test/markdown-link-literals.test.ts
+            marker: an explicit module link retains its __init__.py destination
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+
+    services:
+      postgres:
+        # Matches docker-compose.yml. A test suite that passes against a
+        # different major version than production is not evidence about
+        # production.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: agenticjobs
+          POSTGRES_PASSWORD: agenticjobs
+          POSTGRES_DB: agenticjobs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agenticjobs"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgres://agenticjobs:agenticjobs@localhost:5432/agenticjobs
+      PGSSLMODE: disable
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.head }}
+          persist-credentials: false
+      - name: Verify exact submitted source
+        env:
+          EXPECTED_HEAD: ${{ matrix.head }}
+          EXPECTED_TREE: ${{ matrix.tree }}
+          EXPECTED_REGRESSION: ${{ matrix.regression }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          test -f "$EXPECTED_REGRESSION"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.18.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Test
+        shell: bash
+        env:
+          EXPECTED_TEST_MARKER: ${{ matrix.marker }}
+        # The API suite skips itself when no database is reachable, which is
+        # right on a laptop and wrong here: a silent skip in CI is a green
+        # check that proved nothing.
+        run: |
+          node --test "test/*.test.ts" 2>&1 | tee output.txt
+          grep -Fq "$EXPECTED_TEST_MARKER" output.txt
+          grep -q "no database" output.txt && { echo "::error::the API suite skipped itself"; exit 1; }
+          exit 0
+
+      # Production runs dist/ under Bun (see the Dockerfile), so the suite
+      # runs under Bun too, against a fresh database (several api tests
+      # depend on the seed). Node stays the gate above because the npm
+      # package targets Node; this step catches the places the two runtimes
+      # differ (callback error values, child processes started with
+      # process.execPath). Each file gets its own process, as under node
+      # --test. cli-sync.test.ts is left out: it mocks an import with
+      # node:module registerHooks, which Bun does not implement.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Test under Bun
+        shell: bash
+        env:
+          EXPECTED_REGRESSION: ${{ matrix.regression }}
+          EXPECTED_TEST_MARKER: ${{ matrix.marker }}
+        run: |
+          PGPASSWORD=agenticjobs psql -h localhost -U agenticjobs -d postgres \
+            -c 'drop database agenticjobs with (force)' -c 'create database agenticjobs'
+          files=$(grep -L registerHooks test/*.test.ts)
+          test -n "$files"
+          printf '%s\n' "$files" | grep -Fxq "$EXPECTED_REGRESSION"
+          echo "Bun exclusions (Node-only registerHooks):"
+          grep -l registerHooks test/*.test.ts || true
+          failed=""
+          for f in $files; do
+            bun test "./$f" > bun-out.txt 2>&1 || { cat bun-out.txt; failed="$failed $f"; }
+            if grep -q "no database" bun-out.txt; then echo "::error::$f skipped its database tests"; failed="$failed $f"; fi
+            cat bun-out.txt >> bun-all.txt
+          done
+          # A tally, so a green step that ran nothing is visible as one.
+          sed 's/\x1b\[[0-9;]*m//g' bun-all.txt | grep -E '^ *[0-9]+ (pass|fail|skip)$' \
+            | awk '{ n[$2] += $1 } END { printf "bun test: %d pass, %d fail, %d skip\n", n["pass"], n["fail"], n["skip"] }'
+          if [ -n "$failed" ]; then echo "::error::failed under Bun:$failed"; exit 1; fi
+          grep -Fq "$EXPECTED_TEST_MARKER" bun-all.txt
+
+      - name: The docs the board serves must exist
+        run: |
+          test -f docs/openjob.md
+          test -f docs/openresume.md
+
+      - name: Preserve test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paid-bugfix-test-logs-${{ matrix.pr }}
+          path: |
+            output.txt
+            bun-all.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  docker:
+    name: Container smoke checks / PR ${{ matrix.pr }}
+    if: github.repository == 'Dayire/agenticjobs'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 304
+            head: 4b725e78c93c474b1b78cd344f69da5453b33622
+            tree: c2aa83002af714bfc6f5378e94f7859cd1f74bb1
+            regression: test/mcp-notification-response.test.ts
+          - pr: 305
+            head: 43bd59034876359f8621d085d40a14eda9069871
+            tree: 9bbdfafa38af76a4c2b45b7d49e8d0566f46b1ee
+            regression: test/markdown-link-literals.test.ts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.head }}
+          persist-credentials: false
+      - name: Verify exact submitted source
+        env:
+          EXPECTED_HEAD: ${{ matrix.head }}
+          EXPECTED_TREE: ${{ matrix.tree }}
+          EXPECTED_REGRESSION: ${{ matrix.regression }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$EXPECTED_TREE"
+          test -f "$EXPECTED_REGRESSION"
+      - name: Build the image
+        run: docker build -t agenticjobs:ci .
+      - name: It starts and answers
+        run: |
+          docker network create ci
+          docker run -d --name db --network ci \
+            -e POSTGRES_USER=agenticjobs -e POSTGRES_PASSWORD=agenticjobs -e POSTGRES_DB=agenticjobs \
+            postgres:17-alpine
+          for i in $(seq 1 30); do
+            docker exec db pg_isready -U agenticjobs && break
+            sleep 2
+          done
+          docker exec db pg_isready -U agenticjobs
+          docker run -d --name app --network ci -p 8787:8787 \
+            -e DATABASE_URL=postgres://agenticjobs:agenticjobs@db:5432/agenticjobs \
+            -e PGSSLMODE=disable -e SECRET=ci-secret \
+            agenticjobs:ci
+          for i in $(seq 1 40); do
+            curl -fsS http://localhost:8787/api/v1/stats && break
+            sleep 2
+          done
+          curl -fsS http://localhost:8787/api/v1/stats
+          curl -fsS http://localhost:8787/.well-known/agenticjobs
+          # pdftotext is what makes PDF resumes work; the image is wrong
+          # without it and nothing else would notice.
+          docker exec app sh -c 'command -v pdftotext && command -v pandoc && command -v weasyprint'
+          # The board runs on Bun, as uid 1000, and there is no node to fall
+          # back to.
+          docker top app -eo pid,user,args | tee top.txt
+          grep -q 'bun dist/cli/index.js serve' top.txt
+          docker exec app sh -c 'test "$(id -u)" -eq 1000'
+          if docker exec app sh -c 'command -v node'; then echo '::error::node is in the image'; exit 1; fi
+          # PID 1 must answer SIGTERM, or every deploy waits ten seconds.
+          start=$(date +%s); docker stop -t 10 app; end=$(date +%s)
+          echo "docker stop took $((end - start))s"
+          test $((end - start)) -lt 5
